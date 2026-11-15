@@ -55,7 +55,6 @@ final class Updater {
 
     void check(boolean manual) {
         if (!manual && System.currentTimeMillis() - prefs.getLong("lastUpdateCheck", 0) < AUTO_INTERVAL) return;
-        prefs.edit().putLong("lastUpdateCheck", System.currentTimeMillis()).apply();
         if (manual) toast("Suche nach Updates …");
         new Thread(() -> {
             try {
@@ -73,6 +72,8 @@ final class Updater {
                     while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
                 }
                 JSONObject rel = new JSONObject(out.toString("UTF-8"));
+                // Nur erfolgreiche Pruefungen zaehlen (sonst z. B. nach Netzwerkfehler erst in 6 h wieder)
+                prefs.edit().putLong("lastUpdateCheck", System.currentTimeMillis()).apply();
                 String latest = rel.getString("tag_name").replaceFirst("^[vV]", "");
                 String notes = rel.optString("body", "");
                 String apk = null;
@@ -134,7 +135,28 @@ final class Updater {
         }
     }
 
+    private Uri pendingInstall;
+    private String pendingFallback;
+
+    /** Aus onResume: Nach dem Erlauben "Unbekannte Apps installieren" automatisch weitermachen. */
+    void resumePendingInstall() {
+        if (pendingInstall == null || Build.VERSION.SDK_INT < 26) return;
+        if (!act.getPackageManager().canRequestPackageInstalls()) return;
+        Uri f = pendingInstall; pendingInstall = null;
+        install(f, pendingFallback);
+    }
+
     private void install(Uri file, String fallbackUrl) {
+        if (Build.VERSION.SDK_INT >= 26 && !act.getPackageManager().canRequestPackageInstalls()) {
+            pendingInstall = file;
+            pendingFallback = fallbackUrl;
+            toast("Bitte \"Aus dieser Quelle zulassen\" einschalten und zurückkehren – das Update startet dann automatisch.");
+            try {
+                act.startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:" + act.getPackageName())));
+                return;
+            } catch (Exception ignored) { pendingInstall = null; }
+        }
         Intent i = new Intent(Intent.ACTION_VIEW)
             .setDataAndType(file, "application/vnd.android.package-archive")
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
