@@ -6,6 +6,8 @@ Eine schlanke Android-App, die eine frei wählbare Streaming-Webseite in einem e
 - **Download** – MP4 über den Android-Download-Manager, HLS über einen Hintergrund-Dienst mit Qualitätswahl und Fortschritt in der Benachrichtigung. Dateien landen unter `Download/AnimeWebApp`.
 - **Werbe- und Popup-Blocker** – blockiert bekannte Werbe-Netzwerke, Popups, Umleitungen auf fremde Seiten und App-Store-Links.
 
+Beim Start erscheint die **Seitenauswahl**: Alle gespeicherten Webseiten als große Kacheln mit Vorschaubild. Über „Webseite hinzufügen“ kommen neue dazu, gedrückt halten zum Bearbeiten, Verschieben oder Löschen.
+
 Bedient wird alles über den runden ⬇-Knopf (verschiebbar), der ein Feld mit den gefundenen Streams und den Einstellungen öffnet.
 
 ## Installation

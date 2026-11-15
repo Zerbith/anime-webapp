@@ -89,6 +89,11 @@ public class MainActivity extends Activity {
     private long lastPopupToast;
     private Runnable pendingAfterPermission;
     private Updater updater;
+    private SiteStore store;
+    private SiteStore.Site currentSite;
+    private FrameLayout picker;
+    private LinearLayout pickerContent;
+    private boolean clearHistoryPending;
 
     // ======================================================================
     @Override
@@ -112,18 +117,31 @@ public class MainActivity extends Activity {
         buildFab();
         setContentView(root);
 
-        if (saved != null) {
-            web.restoreState(saved);
-        } else {
-            String url = prefs.getString("url", null);
-            if (url == null) askUrl(true); else web.loadUrl(url);
-        }
+        store = new SiteStore(this, prefs);
         updater = new Updater(this, prefs);
+        buildPicker();
+        String savedSite = saved != null ? saved.getString("site") : null;
+        if (savedSite != null && store.byId(savedSite) != null) {
+            currentSite = store.byId(savedSite);
+            web.restoreState(saved);
+            picker.setVisibility(View.GONE);
+        } else {
+            showPicker();
+        }
         updater.loadBlocklist();
-        if (prefs.getString("url", null) != null) updater.check(false); // nicht ueber den Startdialog legen
+        if (!store.sites.isEmpty()) updater.check(false); // nicht ueber den "Seite hinzufuegen"-Dialog legen
     }
 
-    @Override protected void onSaveInstanceState(Bundle out) { super.onSaveInstanceState(out); web.saveState(out); }
+    @Override
+    public void onConfigurationChanged(android.content.res.Configuration c) {
+        super.onConfigurationChanged(c);
+        if (picker != null && picker.getVisibility() == View.VISIBLE) fillPicker(); // Spaltenzahl anpassen
+    }
+
+    @Override protected void onSaveInstanceState(Bundle out) {
+        super.onSaveInstanceState(out);
+        if (currentSite != null && picker.getVisibility() != View.VISIBLE) { web.saveState(out); out.putString("site", currentSite.id); }
+    }
     @Override protected void onPause() { super.onPause(); CookieManager.getInstance().flush(); }
     @Override protected void onResume() { super.onResume(); if (updater != null) updater.resumePendingInstall(); }
 
@@ -131,8 +149,9 @@ public class MainActivity extends Activity {
     public void onBackPressed() {
         if (customView != null) { exitFullscreen(); return; }
         if (sheet != null && sheet.isShowing()) { sheet.dismiss(); return; }
+        if (picker.getVisibility() == View.VISIBLE) { super.onBackPressed(); return; }
         if (web.canGoBack()) { web.goBack(); return; }
-        super.onBackPressed();
+        showPicker(); // ganz zurueck -> Seitenauswahl
     }
 
     @Override protected void onDestroy() { if (web != null) web.destroy(); super.onDestroy(); }
@@ -223,6 +242,8 @@ public class MainActivity extends Activity {
                 + "try{WebAppTools.report(u,location.href)}catch(x){}}})}"
                 + "setInterval(scan,3000);scan();})();";
             v.evaluateJavascript(js, null);
+            if (clearHistoryPending && !"about:blank".equals(url)) { clearHistoryPending = false; v.clearHistory(); }
+            maybeCaptureThumb(url);
         }
     }
 
@@ -575,8 +596,8 @@ public class MainActivity extends Activity {
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setPadding(0, dp(10), 0, 0);
         row.addView(button("Neu laden", false, v -> { sheet.dismiss(); web.reload(); }), weighted(0));
-        row.addView(button("Startseite", false, v -> { sheet.dismiss(); web.loadUrl(prefs.getString("url", "about:blank")); }), weighted(8));
-        row.addView(button("Seite ändern", false, v -> { sheet.dismiss(); askUrl(false); }), weighted(8));
+        row.addView(button("Startseite", false, v -> { sheet.dismiss(); if (currentSite != null) web.loadUrl(currentSite.url); }), weighted(8));
+        row.addView(button("Seitenauswahl", false, v -> { sheet.dismiss(); showPicker(); }), weighted(8));
         c.addView(row);
 
         LinearLayout upd = new LinearLayout(this);
@@ -738,35 +759,254 @@ public class MainActivity extends Activity {
     }
 
     // ======================================================================
-    // Webseite festlegen
-    private void askUrl(boolean firstStart) {
-        final EditText input = new EditText(this);
-        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        input.setText(prefs.getString("url", "https://"));
-        input.setSelection(input.getText().length());
-        input.setSingleLine(true);
-        FrameLayout box = new FrameLayout(this);
-        box.setPadding(dp(20), dp(8), dp(20), 0);
-        box.addView(input);
-        input.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_GO);
-        final AlertDialog d = new AlertDialog.Builder(this)
-            .setTitle(firstStart ? "Welche Webseite soll die App öffnen?" : "Webseite ändern")
-            .setView(box)
-            .setCancelable(!firstStart)
-            .setPositiveButton("Öffnen", (dlg, w) -> {
-                String url = input.getText().toString().trim();
-                if (url.isEmpty() || url.equals("https://")) { if (firstStart) finish(); return; }
-                if (!url.matches("(?i)^https?://.*")) url = "https://" + url;
-                prefs.edit().putString("url", url).apply();
-                web.loadUrl(url);
+    // Startbildschirm: gespeicherte Seiten als Kacheln
+    private static final int[] TILE_COLORS = {0xFF5B4BDB, 0xFF2F80ED, 0xFF27AE60, 0xFFE2711D, 0xFFD6336C, 0xFF0CA678, 0xFF7048E8};
+
+    private void buildPicker() {
+        picker = new FrameLayout(this);
+        picker.setBackgroundColor(BG);
+        ScrollView sv = new ScrollView(this);
+        sv.setFillViewport(true);
+        pickerContent = new LinearLayout(this);
+        pickerContent.setOrientation(LinearLayout.VERTICAL);
+        pickerContent.setPadding(dp(16), dp(20), dp(16), dp(24));
+        sv.addView(pickerContent);
+        picker.addView(sv, new FrameLayout.LayoutParams(-1, -1));
+        root.addView(picker, new FrameLayout.LayoutParams(-1, -1));
+    }
+
+    private void showPicker() {
+        if (customView != null) exitFullscreen();
+        currentSite = null;
+        web.stopLoading();
+        web.loadUrl("about:blank"); // Wiedergabe/Ton der alten Seite beenden
+        streams.clear();
+        updateBadge();
+        fillPicker();
+        picker.setVisibility(View.VISIBLE);
+        picker.bringToFront();
+        fab.setVisibility(View.GONE);
+    }
+
+    private void openSite(SiteStore.Site s) {
+        currentSite = s;
+        prefs.edit().putString("lastSite", s.id).apply();
+        streams.clear();
+        updateBadge();
+        currentPageUrl = "";
+        clearHistoryPending = true; // "Zurueck" soll nicht in die vorige Seite fuehren
+        picker.setVisibility(View.GONE);
+        fab.setVisibility(View.VISIBLE);
+        fab.bringToFront();
+        web.loadUrl(s.url);
+    }
+
+    private void fillPicker() {
+        LinearLayout c = pickerContent;
+        c.removeAllViews();
+
+        TextView title = text("Meine Seiten", 26, TEXT, true);
+        c.addView(title);
+        TextView sub = text(store.sites.isEmpty()
+            ? "Füge deine erste Webseite hinzu."
+            : "Antippen zum Öffnen · gedrückt halten zum Bearbeiten", 14, MUTED, false);
+        sub.setPadding(0, dp(4), 0, dp(18));
+        c.addView(sub);
+
+        int widthDp = (int) (getResources().getDisplayMetrics().widthPixels / getResources().getDisplayMetrics().density) - 32;
+        int cols = Math.max(2, Math.min(5, widthDp / 170));
+        int gap = dp(12);
+        int tileW = (getResources().getDisplayMetrics().widthPixels - dp(32) - gap * (cols - 1)) / cols;
+
+        List<View> tiles = new ArrayList<>();
+        for (SiteStore.Site s : store.sites) tiles.add(siteTile(s, tileW));
+        tiles.add(addTile(tileW));
+
+        LinearLayout row = null;
+        for (int i = 0; i < tiles.size(); i++) {
+            if (i % cols == 0) {
+                row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(-1, -2);
+                if (i > 0) rp.topMargin = gap;
+                c.addView(row, rp);
+            }
+            LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(tileW, -2);
+            if (i % cols != 0) tp.leftMargin = gap;
+            row.addView(tiles.get(i), tp);
+        }
+
+        TextView ver = text("Version " + (updater != null ? updater.currentVersion() : ""), 12, MUTED, false);
+        ver.setPadding(0, dp(28), 0, 0);
+        ver.setGravity(Gravity.CENTER_HORIZONTAL);
+        c.addView(ver);
+    }
+
+    private LinearLayout tileFrame() {
+        LinearLayout t = new LinearLayout(this);
+        t.setOrientation(LinearLayout.VERTICAL);
+        GradientDrawable bg = rounded(CARD, 14);
+        bg.setStroke(dp(1), BORDER);
+        t.setBackground(bg);
+        t.setClipToOutline(true);
+        GradientDrawable mask = rounded(Color.WHITE, 14);
+        t.setForeground(new android.graphics.drawable.RippleDrawable(
+            android.content.res.ColorStateList.valueOf(0x40FFFFFF), null, mask));
+        t.setClickable(true);
+        t.setFocusable(true);
+        return t;
+    }
+
+    private View siteTile(SiteStore.Site s, int tileW) {
+        LinearLayout t = tileFrame();
+        int imgH = tileW * 10 / 16;
+        Bitmap thumb = store.thumb(s);
+        if (thumb != null) {
+            android.widget.ImageView img = new android.widget.ImageView(this);
+            img.setScaleType(android.widget.ImageView.ScaleType.CENTER_CROP);
+            img.setImageBitmap(thumb);
+            t.addView(img, new LinearLayout.LayoutParams(-1, imgH));
+        } else {
+            TextView ph = text(s.name.isEmpty() ? "?" : s.name.substring(0, 1).toUpperCase(Locale.ROOT), 40, Color.WHITE, true);
+            ph.setGravity(Gravity.CENTER);
+            ph.setBackgroundColor(TILE_COLORS[Math.abs(s.id.hashCode()) % TILE_COLORS.length]);
+            t.addView(ph, new LinearLayout.LayoutParams(-1, imgH));
+        }
+        LinearLayout info = new LinearLayout(this);
+        info.setOrientation(LinearLayout.VERTICAL);
+        info.setPadding(dp(12), dp(10), dp(12), dp(12));
+        TextView name = text(s.name, 16, TEXT, true);
+        name.setSingleLine(true);
+        name.setEllipsize(TextUtils.TruncateAt.END);
+        info.addView(name);
+        TextView h = text(host(s.url) == null ? s.url : host(s.url).replaceFirst("^www\\.", ""), 12, MUTED, false);
+        h.setSingleLine(true);
+        h.setEllipsize(TextUtils.TruncateAt.END);
+        info.addView(h);
+        t.addView(info);
+        t.setOnClickListener(v -> openSite(s));
+        t.setOnLongClickListener(v -> { siteMenu(s); return true; });
+        return t;
+    }
+
+    private View addTile(int tileW) {
+        LinearLayout t = tileFrame();
+        GradientDrawable bg = rounded(BG, 14);
+        bg.setStroke(dp(2), BORDER, dp(8), dp(6));
+        t.setBackground(bg);
+        t.setGravity(Gravity.CENTER);
+        int imgH = tileW * 10 / 16;
+        TextView plus = text("+", 44, 0xFFA9A4FF, false);
+        plus.setGravity(Gravity.CENTER);
+        t.addView(plus, new LinearLayout.LayoutParams(-1, imgH));
+        TextView label = text("Webseite hinzufügen", 15, TEXT, true);
+        label.setGravity(Gravity.CENTER);
+        label.setPadding(dp(8), 0, dp(8), dp(22));
+        t.addView(label, new LinearLayout.LayoutParams(-1, -2));
+        t.setOnClickListener(v -> editSite(null));
+        return t;
+    }
+
+    private void siteMenu(SiteStore.Site s) {
+        String[] items = {"Öffnen", "Bearbeiten", "Vorschaubild neu aufnehmen", "Nach vorne verschieben", "Löschen"};
+        new AlertDialog.Builder(this)
+            .setTitle(s.name)
+            .setItems(items, (d, which) -> {
+                switch (which) {
+                    case 0: openSite(s); break;
+                    case 1: editSite(s); break;
+                    case 2:
+                        s.thumbTime = 0;
+                        //noinspection ResultOfMethodCallIgnored
+                        store.thumbFile(s).delete();
+                        store.save();
+                        Toast.makeText(this, "Wird beim nächsten Öffnen neu aufgenommen", Toast.LENGTH_SHORT).show();
+                        fillPicker();
+                        break;
+                    case 3:
+                        store.sites.remove(s);
+                        store.sites.add(0, s);
+                        store.save();
+                        fillPicker();
+                        break;
+                    default:
+                        new AlertDialog.Builder(this)
+                            .setTitle("Löschen?")
+                            .setMessage("\"" + s.name + "\" aus der Liste entfernen?")
+                            .setPositiveButton("Löschen", (d2, w2) -> { store.remove(s); fillPicker(); })
+                            .setNegativeButton("Abbrechen", null)
+                            .show();
+                }
             })
-            .setNegativeButton(firstStart ? "Beenden" : "Abbrechen", (dlg, w) -> { if (firstStart) finish(); })
+            .show();
+    }
+
+    /** Neue Seite hinzufuegen (s == null) oder bestehende bearbeiten. */
+    private void editSite(SiteStore.Site s) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(20), dp(8), dp(20), 0);
+        final EditText url = new EditText(this);
+        url.setHint("Adresse, z. B. aniworld.to");
+        url.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        url.setSingleLine(true);
+        url.setText(s != null ? s.url : "https://");
+        url.setSelection(url.getText().length());
+        final EditText name = new EditText(this);
+        name.setHint("Name (optional)");
+        name.setSingleLine(true);
+        name.setText(s != null ? s.name : "");
+        name.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_DONE);
+        box.addView(url);
+        box.addView(name);
+        final AlertDialog d = new AlertDialog.Builder(this)
+            .setTitle(s == null ? "Webseite hinzufügen" : "Webseite bearbeiten")
+            .setView(box)
+            .setPositiveButton(s == null ? "Hinzufügen" : "Speichern", null)
+            .setNegativeButton("Abbrechen", null)
             .create();
-        // Enter/"Los" auf der Tastatur bestaetigt wie "Öffnen"
-        input.setOnEditorActionListener((v, actionId, ev) -> {
-            d.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
-            return true;
-        });
+        Runnable save = () -> {
+            String u = url.getText().toString().trim();
+            if (u.isEmpty() || u.equals("https://") || u.equals("http://")) { url.setError("Bitte eine Adresse eingeben"); return; }
+            u = SiteStore.normalizeUrl(u);
+            String n = name.getText().toString().trim();
+            if (n.isEmpty()) n = SiteStore.nameFromUrl(u);
+            d.dismiss();
+            if (s == null) {
+                openSite(store.add(n, u)); // neue Seite gleich oeffnen
+            } else {
+                boolean urlChanged = !u.equals(s.url);
+                s.name = n;
+                s.url = u;
+                if (urlChanged) { s.thumbTime = 0; store.thumbFile(s).delete(); }
+                store.save();
+                fillPicker();
+            }
+        };
+        d.setOnShowListener(x -> d.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> save.run()));
+        name.setOnEditorActionListener((v, actionId, ev) -> { save.run(); return true; });
         d.show();
+    }
+
+    /** Vorschaubild der Seite aufnehmen (einmal pro Tag), sobald sie geladen ist. */
+    private void maybeCaptureThumb(String url) {
+        final SiteStore.Site s = currentSite;
+        if (s == null || url == null || !url.startsWith("http") || !sameSite(url, s.url)) return;
+        if (System.currentTimeMillis() - s.thumbTime < 24L * 60 * 60 * 1000 && store.thumbFile(s).exists()) return;
+        ui.postDelayed(() -> {
+            if (currentSite != s || picker.getVisibility() == View.VISIBLE || customView != null) return;
+            int w = web.getWidth(), h = web.getHeight();
+            if (w <= 0 || h <= 0) return;
+            float scale = 480f / w;
+            int bh = Math.min(h, w * 10 / 16);
+            try {
+                Bitmap b = Bitmap.createBitmap(480, Math.round(bh * scale), Bitmap.Config.RGB_565);
+                android.graphics.Canvas cv = new android.graphics.Canvas(b);
+                cv.scale(scale, scale);
+                cv.translate(-web.getScrollX(), -web.getScrollY());
+                web.draw(cv);
+                store.saveThumb(s, b);
+            } catch (Throwable ignored) {}
+        }, 3500);
     }
 }
