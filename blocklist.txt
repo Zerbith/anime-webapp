@@ -1,0 +1,10 @@
+# Online-Sperrliste fuer Anime WebApp
+# Die App laedt diese Datei alle 12 Stunden – neue Werbe-Domains hier eintragen (eine pro Zeile),
+# dann wirken sie ohne neue App-Version. Subdomains werden automatisch mit blockiert.
+
+# Monetag / Propeller "In-Page-Push" (gesehen auf aniworld.to, Nov 2026)
+rtmark.net
+llvpn.com
+ueuee.com
+axgbr.com
+luugy.com

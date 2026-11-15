@@ -25,8 +25,25 @@ final class AdBlocker {
         "rubiconproject.com", "scorecardresearch.com", "smartadserver.com", "spotxchange.com",
         "statcounter.com", "stroeerdigitalgroup.de", "taboola.com", "trafficjunky.com",
         "trafficjunky.net", "tsyndicate.com", "wpadmngr.com", "yandexadexchange.net", "yieldlab.net",
-        "yieldlove.com", "yllix.com", "zedo.com", "outbrain.com"
+        "yieldlove.com", "yllix.com", "zedo.com", "outbrain.com",
+        // Monetag/Propeller "In-Page-Push" (falsche Benachrichtigungen), gesehen auf aniworld.to
+        "rtmark.net", "llvpn.com", "ueuee.com", "axgbr.com", "luugy.com"
     ));
+
+    /** Zusaetzliche Domains aus der Online-Sperrliste (GitHub), wird zur Laufzeit gesetzt. */
+    static volatile Set<String> remote = new HashSet<>();
+
+    /** Monetag-Muster: <zufall>.com/tag.min.js bzw. /400/<zone>, /5/<zone>/ … */
+    private static final java.util.regex.Pattern AD_PATH = java.util.regex.Pattern.compile(
+        "^/(tag\\.min\\.js|sw\\.js|(4|5|400|401|500|501)/\\d{6,9}(/.*)?)$");
+
+    /** Domain auf der Liste ODER typisches Werbe-Muster bei einer fremden (Dritt-)Domain. */
+    static boolean isAdRequest(String host, String path, String pageHost) {
+        if (isAd(host)) return true;
+        if (host == null || path == null) return false;
+        boolean thirdParty = pageHost == null || !baseDomain(host).equals(baseDomain(pageHost));
+        return thirdParty && AD_PATH.matcher(path).matches();
+    }
 
     static final String COSMETIC_CSS =
         "ins.adsbygoogle,.adsbygoogle,[id^=\"google_ads_\"],[id^=\"div-gpt-ad\"]," +
@@ -40,7 +57,7 @@ final class AdBlocker {
         if (host == null) return false;
         String h = host.toLowerCase();
         while (true) {
-            if (DOMAINS.contains(h)) return true;
+            if (DOMAINS.contains(h) || remote.contains(h)) return true;
             int dot = h.indexOf('.');
             if (dot < 0 || h.indexOf('.', dot + 1) < 0) return false;
             h = h.substring(dot + 1);

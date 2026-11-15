@@ -119,7 +119,8 @@ public class MainActivity extends Activity {
             if (url == null) askUrl(true); else web.loadUrl(url);
         }
         updater = new Updater(this, prefs);
-        updater.check(false);
+        updater.loadBlocklist();
+        if (prefs.getString("url", null) != null) updater.check(false); // nicht ueber den Startdialog legen
     }
 
     @Override protected void onSaveInstanceState(Bundle out) { super.onSaveInstanceState(out); web.saveState(out); }
@@ -187,7 +188,7 @@ public class MainActivity extends Activity {
         @Override
         public WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest r) {
             String url = r.getUrl().toString();
-            if (adblock && AdBlocker.isAd(r.getUrl().getHost())) return empty();
+            if (adblock && AdBlocker.isAdRequest(r.getUrl().getHost(), r.getUrl().getPath(), host(currentPageUrl))) return empty();
             String ref = r.getRequestHeaders() != null ? r.getRequestHeaders().get("Referer") : null;
             detect(url, ref, false);
             return null;

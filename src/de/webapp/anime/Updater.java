@@ -53,6 +53,42 @@ final class Updater {
         try { return Integer.parseInt(s.replaceAll("\\D.*$", "")); } catch (Exception e) { return 0; }
     }
 
+    // ---------- Online-Sperrliste (blocklist.txt im GitHub-Repo) ----------
+
+    private static final String BLOCKLIST_URL = "https://raw.githubusercontent.com/" + REPO + "/main/blocklist.txt";
+    private static final long BLOCKLIST_INTERVAL = 12L * 60 * 60 * 1000;
+
+    /** Gespeicherte Liste sofort anwenden, alle 12 h im Hintergrund neu laden. */
+    void loadBlocklist() {
+        applyBlocklist(prefs.getString("blocklist", ""));
+        if (System.currentTimeMillis() - prefs.getLong("blocklistTime", 0) < BLOCKLIST_INTERVAL) return;
+        new Thread(() -> {
+            try {
+                HttpURLConnection c = (HttpURLConnection) new URL(BLOCKLIST_URL).openConnection();
+                c.setConnectTimeout(15000);
+                c.setReadTimeout(15000);
+                if (c.getResponseCode() != 200) return;
+                ByteArrayOutputStream out = new ByteArrayOutputStream();
+                try (InputStream in = c.getInputStream()) {
+                    byte[] buf = new byte[8192]; int n;
+                    while ((n = in.read(buf)) > 0 && out.size() < 2_000_000) out.write(buf, 0, n);
+                }
+                String text = out.toString("UTF-8");
+                prefs.edit().putString("blocklist", text).putLong("blocklistTime", System.currentTimeMillis()).apply();
+                applyBlocklist(text);
+            } catch (Exception ignored) {}
+        }).start();
+    }
+
+    private static void applyBlocklist(String text) {
+        java.util.Set<String> set = new java.util.HashSet<>();
+        for (String line : text.split("\\r?\\n")) {
+            String d = line.replaceAll("#.*$", "").trim().toLowerCase(java.util.Locale.ROOT);
+            if (d.matches("[a-z0-9.-]+\\.[a-z]{2,}")) set.add(d);
+        }
+        AdBlocker.remote = set;
+    }
+
     void check(boolean manual) {
         if (!manual && System.currentTimeMillis() - prefs.getLong("lastUpdateCheck", 0) < AUTO_INTERVAL) return;
         if (manual) toast("Suche nach Updates …");
