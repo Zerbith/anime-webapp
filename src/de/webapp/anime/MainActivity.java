@@ -94,6 +94,8 @@ public class MainActivity extends Activity {
     private FrameLayout picker;
     private LinearLayout pickerContent;
     private boolean clearHistoryPending;
+    private volatile boolean pageError;
+    private android.widget.ImageView castBtn, castFull;
 
     // ======================================================================
     @Override
@@ -227,7 +229,13 @@ public class MainActivity extends Activity {
         }
 
         @Override
+        public void onReceivedError(WebView v, WebResourceRequest r, android.webkit.WebResourceError e) {
+            if (r.isForMainFrame()) pageError = true; // keine Vorschaubilder von Fehlerseiten
+        }
+
+        @Override
         public void onPageStarted(WebView v, String url, Bitmap favicon) {
+            pageError = false;
             if (!url.equals(currentPageUrl)) { streams.clear(); updateBadge(); }
             currentPageUrl = url;
         }
@@ -258,7 +266,14 @@ public class MainActivity extends Activity {
             customView = view;
             customCallback = cb;
             root.addView(view, new FrameLayout.LayoutParams(-1, -1));
+            // Cast-Knopf oben rechts im Vollbild
+            castFull = castIcon(48, 0x99000000);
+            FrameLayout.LayoutParams cfl = new FrameLayout.LayoutParams(dp(48), dp(48), Gravity.TOP | Gravity.END);
+            cfl.setMargins(0, dp(16), dp(16), 0);
+            root.addView(castFull, cfl);
+            castFull.setAlpha(0.7f);
             fab.setVisibility(View.GONE);
+            if (castBtn != null) castBtn.setVisibility(View.GONE);
             setFullscreenUi(true);
             setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
         }
@@ -303,10 +318,11 @@ public class MainActivity extends Activity {
     private void exitFullscreen() {
         if (customView == null) return;
         root.removeView(customView);
+        if (castFull != null) { root.removeView(castFull); castFull = null; }
         customView = null;
         if (customCallback != null) customCallback.onCustomViewHidden();
         customCallback = null;
-        fab.setVisibility(View.VISIBLE);
+        setFabVisible(true);
         setFullscreenUi(false);
         setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
     }
@@ -430,6 +446,7 @@ public class MainActivity extends Activity {
                             float minY = -(v.getTop()), maxY = p.getHeight() - v.getBottom();
                             v.setTranslationX(Math.max(minX, Math.min(maxX, startTx + dx)));
                             v.setTranslationY(Math.max(minY, Math.min(maxY, startTy + dy)));
+                            followFab();
                         }
                         return true;
                     case MotionEvent.ACTION_UP:
@@ -448,10 +465,46 @@ public class MainActivity extends Activity {
                 return false;
             }
         });
+        // Kleiner Cast-Knopf ueber dem Hauptknopf (sichtbar, sobald ein Video laeuft)
+        castBtn = castIcon(46, 0xE62C2A36);
+        FrameLayout.LayoutParams cl = new FrameLayout.LayoutParams(dp(46), dp(46), Gravity.BOTTOM | Gravity.END);
+        cl.setMargins(0, 0, dp(14 + 9), dp(18 + 64 + 10));
+        root.addView(castBtn, cl);
+        castBtn.setVisibility(View.GONE);
+
         fab.post(() -> {
             fab.setTranslationX(prefs.getFloat("fabX", 0));
             fab.setTranslationY(prefs.getFloat("fabY", 0));
+            followFab();
         });
+    }
+
+    private void followFab() {
+        if (castBtn == null) return;
+        castBtn.setTranslationX(fab.getTranslationX());
+        castBtn.setTranslationY(Math.max(-castBtn.getTop(), fab.getTranslationY()));
+    }
+
+    /** Runder Knopf mit Cast-Symbol, oeffnet die Bildschirmuebertragung. */
+    private android.widget.ImageView castIcon(int sizeDp, int bgColor) {
+        android.widget.ImageView b = new android.widget.ImageView(this);
+        b.setImageResource(R.drawable.ic_cast);
+        int pad = dp(sizeDp * 0.24f);
+        b.setPadding(pad, pad, pad, pad);
+        GradientDrawable circle = new GradientDrawable();
+        circle.setShape(GradientDrawable.OVAL);
+        circle.setColor(bgColor);
+        b.setBackground(circle);
+        b.setElevation(dp(4));
+        b.setContentDescription("Auf Fernseher übertragen");
+        b.setOnClickListener(v -> startCast());
+        return b;
+    }
+
+    private void setFabVisible(boolean on) {
+        fab.setVisibility(on ? View.VISIBLE : View.GONE);
+        if (on) { fab.bringToFront(); castBtn.bringToFront(); }
+        updateBadge();
     }
 
     private void updateBadge() {
@@ -459,6 +512,169 @@ public class MainActivity extends Activity {
         badge.setText(String.valueOf(n));
         badge.setVisibility(n > 0 ? View.VISIBLE : View.GONE);
         fab.setAlpha(n > 0 ? 1f : 0.6f);
+        if (castBtn != null) castBtn.setVisibility(n > 0 && fab.getVisibility() == View.VISIBLE ? View.VISIBLE : View.GONE);
+    }
+
+    // ======================================================================
+    // Auf Fernseher uebertragen (Androids Bildschirmuebertragung / Smart View)
+    /** Bester Stream fuer den Fernseher: HLS-Master (zuerst erkannt) > DASH > Videodatei. */
+    private Stream bestStream() {
+        for (Stream s : streams) if ("hls".equals(s.type)) return s;
+        for (Stream s : streams) if ("dash".equals(s.type)) return s;
+        Stream last = null;
+        for (Stream s : streams) if ("video".equals(s.type)) last = s;
+        return last;
+    }
+
+    /** Geraeteauswahl: Cast-Geraete im WLAN (Shield, Chromecast, ...) + Bildschirm spiegeln. */
+    private void startCast() {
+        if (sheet != null && sheet.isShowing()) sheet.dismiss();
+        final Stream stream = bestStream();
+
+        final List<String[]> devices = new ArrayList<>(); // {Name, Host, Port}
+        final List<String> labels = new ArrayList<>();
+        final String mirrorLabel = "📱  Bildschirm spiegeln (ganzes Handy)";
+        labels.add(mirrorLabel);
+        final android.widget.ArrayAdapter<String> adapter =
+            new android.widget.ArrayAdapter<>(this, android.R.layout.simple_list_item_1, labels);
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        final TextView status = text(stream == null
+            ? "Hinweis: Noch kein Stream erkannt – starte zuerst das Video auf der Seite."
+            : "Suche Geräte im WLAN …", 14, stream == null ? 0xFFF0B429 : MUTED, false);
+        status.setPadding(dp(24), dp(8), dp(24), dp(8));
+        box.addView(status);
+        android.widget.ListView list = new android.widget.ListView(this);
+        list.setAdapter(adapter);
+        box.addView(list, new LinearLayout.LayoutParams(-1, dp(260)));
+
+        final android.net.nsd.NsdManager nsd = getSystemService(android.net.nsd.NsdManager.class);
+        final java.util.ArrayDeque<android.net.nsd.NsdServiceInfo> toResolve = new java.util.ArrayDeque<>();
+        final boolean[] resolving = {false}, active = {true};
+        final Runnable[] resolveNext = new Runnable[1];
+        resolveNext[0] = () -> {
+            if (!active[0] || resolving[0] || toResolve.isEmpty()) return;
+            resolving[0] = true;
+            nsd.resolveService(toResolve.poll(), new android.net.nsd.NsdManager.ResolveListener() {
+                @Override public void onResolveFailed(android.net.nsd.NsdServiceInfo si, int err) { ui.post(() -> { resolving[0] = false; resolveNext[0].run(); }); }
+                @Override public void onServiceResolved(android.net.nsd.NsdServiceInfo si) {
+                    String name = si.getServiceName();
+                    boolean videoCapable = true;
+                    try {
+                        byte[] fn = si.getAttributes().get("fn");
+                        if (fn != null) name = new String(fn, "UTF-8");
+                        byte[] ca = si.getAttributes().get("ca"); // Cast-Faehigkeiten, Bit 0 = Videoausgabe
+                        if (ca != null) videoCapable = (Integer.parseInt(new String(ca, "UTF-8").trim()) & 1) != 0;
+                    } catch (Exception ignored) {}
+                    if (!videoCapable) { ui.post(() -> { resolving[0] = false; resolveNext[0].run(); }); return; }
+                    final String n = name, host = si.getHost().getHostAddress();
+                    final int port = si.getPort();
+                    ui.post(() -> {
+                        resolving[0] = false;
+                        boolean known = false;
+                        for (String[] d : devices) if (d[1].equals(host)) known = true;
+                        if (!known && active[0]) {
+                            devices.add(new String[]{n, host, String.valueOf(port)});
+                            labels.add(labels.size() - 1, "📺  " + n);
+                            adapter.notifyDataSetChanged();
+                            if (stream != null) status.setText("Gerät auswählen:");
+                        }
+                        resolveNext[0].run();
+                    });
+                }
+            });
+        };
+        final android.net.nsd.NsdManager.DiscoveryListener disc = new android.net.nsd.NsdManager.DiscoveryListener() {
+            @Override public void onStartDiscoveryFailed(String t, int e) { ui.post(() -> status.setText("Gerätesuche nicht möglich (WLAN an?)")); }
+            @Override public void onStopDiscoveryFailed(String t, int e) {}
+            @Override public void onDiscoveryStarted(String t) {}
+            @Override public void onDiscoveryStopped(String t) {}
+            @Override public void onServiceFound(android.net.nsd.NsdServiceInfo si) { ui.post(() -> { toResolve.add(si); resolveNext[0].run(); }); }
+            @Override public void onServiceLost(android.net.nsd.NsdServiceInfo si) {}
+        };
+        try { nsd.discoverServices("_googlecast._tcp", android.net.nsd.NsdManager.PROTOCOL_DNS_SD, disc); } catch (Exception ignored) {}
+        ui.postDelayed(() -> { if (active[0] && devices.isEmpty() && stream != null)
+            status.setText("Kein Cast-Gerät gefunden. Ist die Shield an und im selben WLAN?"); }, 8000);
+
+        final AlertDialog d = new AlertDialog.Builder(this)
+            .setTitle("Auf Fernseher abspielen")
+            .setView(box)
+            .setNegativeButton("Abbrechen", null)
+            .create();
+        d.setOnDismissListener(x -> {
+            active[0] = false;
+            try { nsd.stopServiceDiscovery(disc); } catch (Exception ignored) {}
+        });
+        list.setOnItemClickListener((parent, view, pos, id) -> {
+            String label = labels.get(pos);
+            d.dismiss();
+            if (mirrorLabel.equals(label)) { mirrorScreen(); return; }
+            String[] dev = devices.get(pos);
+            if (stream == null) {
+                Toast.makeText(this, "Starte zuerst das Video auf der Seite, dann erneut übertragen", Toast.LENGTH_LONG).show();
+                return;
+            }
+            castTo(dev[0], dev[1], Integer.parseInt(dev[2]), stream);
+        });
+        d.show();
+    }
+
+    private void castTo(String name, String host, int port, Stream s) {
+        askNotificationPermission();
+        Intent i = new Intent(this, CastService.class)
+            .putExtra(CastService.EXTRA_DEVICE, name)
+            .putExtra(CastService.EXTRA_HOST, host)
+            .putExtra(CastService.EXTRA_PORT, port)
+            .putExtra(CastService.EXTRA_URL, s.url)
+            .putExtra(CastService.EXTRA_TYPE, s.type)
+            .putExtra(CastService.EXTRA_REFERER, s.referer)
+            .putExtra(CastService.EXTRA_UA, web.getSettings().getUserAgentString())
+            .putExtra(CastService.EXTRA_TITLE, title());
+        if (Build.VERSION.SDK_INT >= 26) startForegroundService(i); else startService(i);
+        // Wiedergabe am Handy anhalten
+        if (customView != null) exitFullscreen();
+        web.evaluateJavascript("document.querySelectorAll('video').forEach(function(v){try{v.pause()}catch(e){}})", null);
+        Toast.makeText(this, "Wird an " + name + " gesendet – Steuerung in der Benachrichtigung", Toast.LENGTH_LONG).show();
+    }
+
+    private void stopCast() {
+        startService(new Intent(this, CastService.class).setAction(CastService.ACTION_STOP));
+    }
+
+    private void mirrorScreen() {
+        if (!prefs.getBoolean("castTipShown", false)) {
+            prefs.edit().putBoolean("castTipShown", true).apply();
+            new AlertDialog.Builder(this)
+                .setTitle("Bildschirm spiegeln")
+                .setMessage("Gleich öffnet sich die Bildschirmübertragung von Android. Wähle dort deine Shield aus.\n\n"
+                    + "Achtung: Dabei wird das ganze Handy gespiegelt – das Handy muss an und in der App bleiben. "
+                    + "Besser ist, die Shield direkt in der Liste auszuwählen.")
+                .setPositiveButton("Weiter", (d, w) -> openCastSettings())
+                .setNegativeButton("Abbrechen", null)
+                .show();
+            return;
+        }
+        openCastSettings();
+    }
+
+    private void openCastSettings() {
+        // 1. Samsung Smart View
+        Intent samsung = getPackageManager().getLaunchIntentForPackage("com.samsung.android.smartmirroring");
+        if (samsung != null) {
+            try { startActivity(samsung); return; } catch (Exception ignored) {}
+        }
+        // 2. Android "Bildschirm uebertragen" (Pixel, Xiaomi, Motorola, ...)
+        for (String action : new String[]{"android.settings.CAST_SETTINGS", "android.settings.WIFI_DISPLAY_SETTINGS"}) {
+            try { startActivity(new Intent(action)); return; } catch (Exception ignored) {}
+        }
+        // 3. Hilfe, falls das Geraet keine dieser Seiten hat
+        new AlertDialog.Builder(this)
+            .setTitle("Bildschirm übertragen")
+            .setMessage("Ziehe die Schnelleinstellungen von oben herunter und tippe auf „Smart View“, „Bildschirm übertragen“, "
+                + "„Cast“ oder „Screen Mirroring“. Wähle dann deine Shield aus.")
+            .setPositiveButton("OK", null)
+            .show();
     }
 
     // ======================================================================
@@ -537,6 +753,14 @@ public class MainActivity extends Activity {
         hp.gravity = Gravity.CENTER_HORIZONTAL;
         hp.bottomMargin = dp(12);
         c.addView(handle, hp);
+
+        // Auf Fernseher abspielen (bzw. laufende Uebertragung beenden)
+        final String castDev = CastService.activeDevice;
+        TextView castB = button(castDev != null ? "📺  Läuft auf " + castDev + " – beenden" : "📺  Auf Fernseher abspielen", castDev == null,
+            v -> { if (castDev != null) { sheet.dismiss(); stopCast(); } else startCast(); });
+        LinearLayout.LayoutParams cbp = new LinearLayout.LayoutParams(-1, -2);
+        cbp.bottomMargin = dp(14);
+        c.addView(castB, cbp);
 
         c.addView(text("Gefundene Streams (" + streams.size() + ")", 18, TEXT, true));
 
@@ -785,7 +1009,7 @@ public class MainActivity extends Activity {
         fillPicker();
         picker.setVisibility(View.VISIBLE);
         picker.bringToFront();
-        fab.setVisibility(View.GONE);
+        setFabVisible(false);
     }
 
     private void openSite(SiteStore.Site s) {
@@ -796,8 +1020,7 @@ public class MainActivity extends Activity {
         currentPageUrl = "";
         clearHistoryPending = true; // "Zurueck" soll nicht in die vorige Seite fuehren
         picker.setVisibility(View.GONE);
-        fab.setVisibility(View.VISIBLE);
-        fab.bringToFront();
+        setFabVisible(true);
         web.loadUrl(s.url);
     }
 
@@ -950,8 +1173,9 @@ public class MainActivity extends Activity {
         url.setHint("Adresse, z. B. aniworld.to");
         url.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
         url.setSingleLine(true);
-        url.setText(s != null ? s.url : "https://");
+        url.setText(s != null ? s.url : "");
         url.setSelection(url.getText().length());
+        url.requestFocus();
         final EditText name = new EditText(this);
         name.setHint("Name (optional)");
         name.setSingleLine(true);
@@ -991,7 +1215,7 @@ public class MainActivity extends Activity {
     /** Vorschaubild der Seite aufnehmen (einmal pro Tag), sobald sie geladen ist. */
     private void maybeCaptureThumb(String url) {
         final SiteStore.Site s = currentSite;
-        if (s == null || url == null || !url.startsWith("http") || !sameSite(url, s.url)) return;
+        if (s == null || url == null || pageError || !url.startsWith("http") || !sameSite(url, s.url)) return;
         if (System.currentTimeMillis() - s.thumbTime < 24L * 60 * 60 * 1000 && store.thumbFile(s).exists()) return;
         ui.postDelayed(() -> {
             if (currentSite != s || picker.getVisibility() == View.VISIBLE || customView != null) return;

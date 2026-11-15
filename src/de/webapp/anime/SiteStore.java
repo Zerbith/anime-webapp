@@ -96,7 +96,10 @@ final class SiteStore {
     }
 
     static String normalizeUrl(String url) {
-        url = url.trim();
+        url = url.trim().replaceAll("\\s+", "");
+        // doppelte Angaben wie "https://http://seite.de" bereinigen
+        while (url.matches("(?i)^https?:/*https?:/*.*")) url = url.replaceFirst("(?i)^https?:/*", "");
+        url = url.replaceFirst("(?i)^(https?):/*", "$1://");
         if (!url.matches("(?i)^https?://.*")) url = "https://" + url;
         return url;
     }
