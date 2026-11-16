@@ -90,6 +90,7 @@ public class MainActivity extends Activity {
     private Runnable pendingAfterPermission;
     private Updater updater;
     private SiteStore store;
+    private HistoryStore history;
     private SiteStore.Site currentSite;
     private FrameLayout picker;
     private LinearLayout pickerContent;
@@ -126,6 +127,7 @@ public class MainActivity extends Activity {
         setContentView(root);
 
         store = new SiteStore(this, prefs);
+        history = new HistoryStore(prefs);
         updater = new Updater(this, prefs);
         buildPicker();
         String savedSite = saved != null ? saved.getString("site") : null;
@@ -258,6 +260,8 @@ public class MainActivity extends Activity {
             v.evaluateJavascript(js, null);
             if (clearHistoryPending && !"about:blank".equals(url)) { clearHistoryPending = false; v.clearHistory(); }
             maybeCaptureThumb(url);
+            // Folgenseite besucht -> in den Verlauf
+            if (currentSite != null && !pageError && HistoryStore.looksLikeEpisode(url)) recordHistory(url, false);
         }
     }
 
@@ -464,6 +468,9 @@ public class MainActivity extends Activity {
         for (Stream s : streams) if (s.url.equals(url)) return;
         if (streams.size() >= 50) streams.remove(0);
         streams.add(new Stream(url, type, referer != null ? referer : currentPageUrl));
+        // Video laeuft auf dieser Seite -> als angesehen im Verlauf merken
+        final String page = currentPageUrl;
+        ui.post(() -> { if (currentSite != null && page.startsWith("http") && page.equals(currentPageUrl)) recordHistory(page, true); });
         ui.post(() -> {
             updateBadge();
             if (sheet != null && sheet.isShowing()) fillSheet();
@@ -859,6 +866,10 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams cbp = new LinearLayout.LayoutParams(-1, -2);
         cbp.bottomMargin = dp(14);
         c.addView(castB, cbp);
+        TextView histB = button("🕘  Verlauf / Weiterschauen", false, v -> showHistory());
+        LinearLayout.LayoutParams hbp = new LinearLayout.LayoutParams(-1, -2);
+        hbp.bottomMargin = dp(14);
+        c.addView(histB, hbp);
 
         c.addView(text("Gefundene Streams (" + streams.size() + ")", 18, TEXT, true));
 
@@ -1110,7 +1121,23 @@ public class MainActivity extends Activity {
         setFabVisible(false);
     }
 
-    private void openSite(SiteStore.Site s) {
+    private void recordHistory(String url, boolean played) {
+        // Nur Folgen/Filme merken – Startseiten mit Trailern usw. nicht
+        if (!HistoryStore.looksLikeEpisode(url)) return;
+        history.record(url, web.getTitle(), currentSite != null ? currentSite.id : null, played);
+    }
+
+    /** Eine Folge aus dem Verlauf oeffnen (passende gespeicherte Seite suchen). */
+    private void openHistory(String url, String siteId) {
+        SiteStore.Site s = siteId != null ? store.byId(siteId) : null;
+        if (s == null) for (SiteStore.Site x : store.sites) if (sameSite(x.url, url)) { s = x; break; }
+        if (s == null) s = new SiteStore.Site("tmp", SiteStore.nameFromUrl(url), url, 0);
+        openSite(s, url);
+    }
+
+    private void openSite(SiteStore.Site s) { openSite(s, null); }
+
+    private void openSite(SiteStore.Site s, String startUrl) {
         currentSite = s;
         prefs.edit().putString("lastSite", s.id).apply();
         streams.clear();
@@ -1119,12 +1146,42 @@ public class MainActivity extends Activity {
         clearHistoryPending = true; // "Zurueck" soll nicht in die vorige Seite fuehren
         picker.setVisibility(View.GONE);
         setFabVisible(true);
-        web.loadUrl(s.url);
+        web.loadUrl(startUrl != null ? startUrl : s.url);
     }
 
     private void fillPicker() {
         LinearLayout c = pickerContent;
         c.removeAllViews();
+
+        // ---- Weiterschauen (zuletzt gesehene Folge je Serie) ----
+        List<HistoryStore.Entry> cont = history.continueList(15);
+        if (!cont.isEmpty()) {
+            LinearLayout head = new LinearLayout(this);
+            head.setOrientation(LinearLayout.HORIZONTAL);
+            head.setGravity(Gravity.CENTER_VERTICAL);
+            head.addView(text("Weiterschauen", 22, TEXT, true), new LinearLayout.LayoutParams(0, -2, 1f));
+            TextView all = text("Verlauf ›", 14, 0xFFA9A4FF, true);
+            all.setPadding(dp(12), dp(8), 0, dp(8));
+            all.setOnClickListener(v -> showHistory());
+            head.addView(all);
+            c.addView(head);
+
+            android.widget.HorizontalScrollView hs = new android.widget.HorizontalScrollView(this);
+            hs.setHorizontalScrollBarEnabled(false);
+            hs.setClipToPadding(false);
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setPadding(0, dp(8), 0, dp(4));
+            for (int i = 0; i < cont.size(); i++) {
+                LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(dp(250), -2);
+                if (i > 0) p.leftMargin = dp(12);
+                row.addView(continueCard(cont.get(i)), p);
+            }
+            hs.addView(row);
+            c.addView(hs);
+            View sp = new View(this);
+            c.addView(sp, new LinearLayout.LayoutParams(-1, dp(22)));
+        }
 
         TextView title = text("Meine Seiten", 26, TEXT, true);
         c.addView(title);
@@ -1161,6 +1218,99 @@ public class MainActivity extends Activity {
         ver.setPadding(0, dp(28), 0, 0);
         ver.setGravity(Gravity.CENTER_HORIZONTAL);
         c.addView(ver);
+    }
+
+    /** "gerade eben", "vor 5 Min.", "vor 2 Std.", "gestern", "vor 3 Tagen", sonst Datum. */
+    private String ago(long time) {
+        long min = Math.max(0, (System.currentTimeMillis() - time) / 60000);
+        if (min < 1) return "gerade eben";
+        if (min < 60) return "vor " + min + " Min.";
+        long h = min / 60;
+        if (h < 24) return "vor " + h + " Std.";
+        long d = h / 24;
+        if (d == 1) return "gestern";
+        if (d < 7) return "vor " + d + " Tagen";
+        return new java.text.SimpleDateFormat("dd.MM.yyyy", Locale.GERMANY).format(new java.util.Date(time));
+    }
+
+    private String siteName(HistoryStore.Entry e) {
+        SiteStore.Site s = e.siteId != null ? store.byId(e.siteId) : null;
+        if (s == null) for (SiteStore.Site x : store.sites) if (sameSite(x.url, e.url)) { s = x; break; }
+        return s != null ? s.name : SiteStore.nameFromUrl(e.url);
+    }
+
+    /** Karte "Weiterschauen": Serie, Staffel/Folge, wann, Weiter-/Naechste-Knoepfe. */
+    private View continueCard(HistoryStore.Entry e) {
+        LinearLayout t = tileFrame();
+        t.setPadding(dp(14), dp(12), dp(14), dp(12));
+        // farbiger Streifen mit Anfangsbuchstaben als "Bild"
+        LinearLayout top = new LinearLayout(this);
+        top.setOrientation(LinearLayout.HORIZONTAL);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        TextView badgeL = text(e.series.isEmpty() ? "?" : e.series.substring(0, 1).toUpperCase(Locale.ROOT), 20, Color.WHITE, true);
+        badgeL.setGravity(Gravity.CENTER);
+        badgeL.setBackground(rounded(TILE_COLORS[Math.abs(e.seriesKey.hashCode()) % TILE_COLORS.length], 10));
+        top.addView(badgeL, new LinearLayout.LayoutParams(dp(44), dp(44)));
+        LinearLayout txt = new LinearLayout(this);
+        txt.setOrientation(LinearLayout.VERTICAL);
+        txt.setPadding(dp(12), 0, 0, 0);
+        TextView name = text(e.series, 15, TEXT, true);
+        name.setMaxLines(2);
+        name.setEllipsize(TextUtils.TruncateAt.END);
+        txt.addView(name);
+        txt.addView(text(e.label(), 13, 0xFFA9A4FF, true));
+        top.addView(txt, new LinearLayout.LayoutParams(0, -2, 1f));
+        t.addView(top);
+        TextView meta = text(ago(e.time) + " · " + siteName(e) + (e.played ? "" : " · nur geöffnet"), 12, MUTED, false);
+        meta.setPadding(0, dp(8), 0, dp(10));
+        meta.setSingleLine(true);
+        meta.setEllipsize(TextUtils.TruncateAt.END);
+        t.addView(meta);
+
+        LinearLayout btns = new LinearLayout(this);
+        btns.setOrientation(LinearLayout.HORIZONTAL);
+        btns.addView(button("▶  Weiter", true, v -> openHistory(e.url, e.siteId)), weighted(0));
+        final String next = HistoryStore.nextUrl(e);
+        if (next != null) btns.addView(button("Nächste ›", false, v -> openHistory(next, e.siteId)), weighted(8));
+        t.addView(btns);
+
+        t.setOnClickListener(v -> openHistory(e.url, e.siteId));
+        t.setOnLongClickListener(v -> {
+            new AlertDialog.Builder(this)
+                .setTitle(e.series)
+                .setMessage("Diese Serie aus „Weiterschauen“ und dem Verlauf entfernen?")
+                .setPositiveButton("Entfernen", (d, w) -> { history.removeSeries(e.seriesKey); fillPicker(); })
+                .setNegativeButton("Abbrechen", null)
+                .show();
+            return true;
+        });
+        return t;
+    }
+
+    /** Kompletter Verlauf (neueste zuerst). */
+    private void showHistory() {
+        if (sheet != null && sheet.isShowing()) sheet.dismiss();
+        if (history.entries.isEmpty()) {
+            Toast.makeText(this, "Noch nichts angesehen", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        final List<HistoryStore.Entry> list = new ArrayList<>(history.entries);
+        String[] items = new String[list.size()];
+        for (int i = 0; i < list.size(); i++) {
+            HistoryStore.Entry e = list.get(i);
+            items[i] = e.series + " – " + e.label() + "\n" + ago(e.time) + " · " + siteName(e);
+        }
+        new AlertDialog.Builder(this)
+            .setTitle("Verlauf")
+            .setItems(items, (d, which) -> openHistory(list.get(which).url, list.get(which).siteId))
+            .setNeutralButton("Verlauf löschen", (d, w) -> new AlertDialog.Builder(this)
+                .setTitle("Verlauf löschen?")
+                .setMessage("Alle gemerkten Folgen werden entfernt.")
+                .setPositiveButton("Löschen", (d2, w2) -> { history.clear(); if (picker.getVisibility() == View.VISIBLE) fillPicker(); })
+                .setNegativeButton("Abbrechen", null)
+                .show())
+            .setNegativeButton("Schließen", null)
+            .show();
     }
 
     private LinearLayout tileFrame() {

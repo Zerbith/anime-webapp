@@ -8,6 +8,8 @@ Eine schlanke Android-App, die eine frei wählbare Streaming-Webseite in einem e
 
 Beim Start erscheint die **Seitenauswahl**: Alle gespeicherten Webseiten als große Kacheln mit Vorschaubild. Über „Webseite hinzufügen“ kommen neue dazu, gedrückt halten zum Bearbeiten, Verschieben oder Löschen.
 
+**Verlauf & Weiterschauen:** Jede geöffnete oder abgespielte Folge wird automatisch mit Serie, Staffel und Folge gemerkt. Auf dem Startbildschirm zeigt „Weiterschauen“ pro Serie die zuletzt gesehene Folge – mit „Weiter“ und „Nächste ›“. Der komplette Verlauf ist über das ⬇-Feld oder „Verlauf ›“ erreichbar und kann gelöscht werden.
+
 **Auf Fernseher abspielen (Google Cast):** Sobald ein Video läuft, erscheint über dem ⬇-Knopf ein Cast-Knopf (auch im Vollbild oben rechts). Die App findet Cast-Geräte im WLAN (z. B. NVIDIA Shield, Chromecast, Fernseher mit Chromecast) und schickt den Stream direkt dorthin – das Handy kann danach gesperrt werden. Steuerung (Pause, ±Sekunden, Beenden) über die Benachrichtigung. Lässt ein Hoster den Fernseher nicht direkt zu, leitet das Handy den Stream automatisch weiter (dann im WLAN lassen). Als Notlösung gibt es „Bildschirm spiegeln“.
 
 Bedient wird alles über den runden ⬇-Knopf (verschiebbar), der ein Feld mit den gefundenen Streams und den Einstellungen öffnet.
