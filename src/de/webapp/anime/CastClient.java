@@ -87,7 +87,7 @@ final class CastClient {
         send(NS_CONN, transportId, new JSONObject().put("type", "CONNECT"));
     }
 
-    void load(String url, String contentType, String title) throws Exception {
+    void load(String url, String contentType, String title, double startAt) throws Exception {
         JSONObject media = new JSONObject()
             .put("contentId", url)
             .put("contentUrl", url)
@@ -95,7 +95,7 @@ final class CastClient {
             .put("contentType", contentType)
             .put("metadata", new JSONObject().put("metadataType", 0).put("title", title == null ? "" : title));
         mediaSessionId = -1;
-        sendMedia(new JSONObject().put("type", "LOAD").put("autoplay", true).put("currentTime", 0).put("media", media));
+        sendMedia(new JSONObject().put("type", "LOAD").put("autoplay", true).put("currentTime", Math.max(0, startAt)).put("media", media));
     }
 
     void play() { sendMediaCmd("PLAY"); }

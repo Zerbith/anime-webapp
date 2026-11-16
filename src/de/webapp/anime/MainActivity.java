@@ -96,6 +96,9 @@ public class MainActivity extends Activity {
     private LinearLayout pickerContent;
     private boolean clearHistoryPending;
     private volatile boolean pageError;
+    private volatile String userAgent;
+    private long lastPositionSave;
+    private volatile double lastPosition = -1;
     private android.widget.ImageView castBtn, castFull;
     private FrameLayout fsWrap;
     private LinearLayout fsButtons;
@@ -152,7 +155,7 @@ public class MainActivity extends Activity {
         super.onSaveInstanceState(out);
         if (currentSite != null && picker.getVisibility() != View.VISIBLE) { web.saveState(out); out.putString("site", currentSite.id); }
     }
-    @Override protected void onPause() { super.onPause(); CookieManager.getInstance().flush(); }
+    @Override protected void onPause() { super.onPause(); CookieManager.getInstance().flush(); if (history != null) history.save(); }
     @Override protected void onResume() { super.onResume(); if (updater != null) updater.resumePendingInstall(); }
 
     @Override
@@ -180,6 +183,7 @@ public class MainActivity extends Activity {
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
         // "; wv" entfernen, damit Seiten den normalen Chrome-Player ausliefern
         s.setUserAgentString(s.getUserAgentString().replace("; wv)", ")").replaceAll("Version/\\S+ ", ""));
+        userAgent = s.getUserAgentString();
         applyPopupSetting();
 
         CookieManager cm = CookieManager.getInstance();
@@ -220,6 +224,11 @@ public class MainActivity extends Activity {
             if (adblock && AdBlocker.isAdRequest(r.getUrl().getHost(), r.getUrl().getPath(), host(currentPageUrl))) return empty();
             String ref = r.getRequestHeaders() != null ? r.getRequestHeaders().get("Referer") : null;
             detect(url, ref, false);
+            // Eingebettete Fenster (Video-Hoster): Positions-Skript einfuegen
+            if (FrameInjector.wants(r)) {
+                WebResourceResponse inj = FrameInjector.load(r, userAgent);
+                if (inj != null) return inj;
+            }
             return null;
         }
 
@@ -244,7 +253,7 @@ public class MainActivity extends Activity {
         @Override
         public void onPageStarted(WebView v, String url, Bitmap favicon) {
             pageError = false;
-            if (!url.equals(currentPageUrl)) { streams.clear(); updateBadge(); }
+            if (!url.equals(currentPageUrl)) { streams.clear(); updateBadge(); lastPosition = -1; }
             currentPageUrl = url;
         }
 
@@ -258,6 +267,7 @@ public class MainActivity extends Activity {
                 + "try{WebAppTools.report(u,location.href)}catch(x){}}})}"
                 + "setInterval(scan,3000);scan();})();";
             v.evaluateJavascript(js, null);
+            v.evaluateJavascript(FrameInjector.TIME_JS, null); // auch Videos direkt auf der Seite
             if (clearHistoryPending && !"about:blank".equals(url)) { clearHistoryPending = false; v.clearHistory(); }
             maybeCaptureThumb(url);
             // Folgenseite besucht -> in den Verlauf
@@ -448,6 +458,32 @@ public class MainActivity extends Activity {
     private final class Bridge {
         @android.webkit.JavascriptInterface
         public void report(String url, String pageUrl) { detect(url, pageUrl, true); }
+
+        /** Abspielposition aus einem beliebigen Fenster (auch Hoster-iframe) – gehoert zur aktuellen Folge. */
+        @android.webkit.JavascriptInterface
+        public void reportTime(double pos, double dur) {
+            final String page = currentPageUrl;
+            ui.post(() -> {
+                if (!page.equals(currentPageUrl) || pos < 0 || dur <= 0) return;
+                if (history.find(page) == null) recordHistory(page, true);
+                long now = System.currentTimeMillis();
+                boolean persist = now - lastPositionSave > 15000;
+                if (persist) lastPositionSave = now;
+                history.setPosition(page, pos, dur, persist);
+                lastPosition = pos;
+            });
+        }
+
+        /** Gemerkte Position der aktuellen Folge (Sekunden) oder -1. */
+        @android.webkit.JavascriptInterface
+        public double getResume() {
+            try { return history.getPosition(currentPageUrl); } catch (Exception e) { return -1; }
+        }
+
+        @android.webkit.JavascriptInterface
+        public void resumed(double pos) {
+            ui.post(() -> Toast.makeText(MainActivity.this, "Fortgesetzt bei " + HistoryStore.fmt(pos), Toast.LENGTH_SHORT).show());
+        }
     }
 
     private static String classify(String url) {
@@ -735,7 +771,9 @@ public class MainActivity extends Activity {
             .putExtra(CastService.EXTRA_TYPE, s.type)
             .putExtra(CastService.EXTRA_REFERER, s.referer)
             .putExtra(CastService.EXTRA_UA, web.getSettings().getUserAgentString())
-            .putExtra(CastService.EXTRA_TITLE, title());
+            .putExtra(CastService.EXTRA_TITLE, title())
+            // an der aktuellen bzw. gemerkten Stelle weiterschauen
+            .putExtra(CastService.EXTRA_START, lastPosition > 15 ? lastPosition : Math.max(0, history.getPosition(currentPageUrl)));
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(i); else startService(i);
         // Wiedergabe am Handy anhalten
         if (customView != null) exitFullscreen();
@@ -1261,6 +1299,18 @@ public class MainActivity extends Activity {
         txt.addView(text(e.label(), 13, 0xFFA9A4FF, true));
         top.addView(txt, new LinearLayout.LayoutParams(0, -2, 1f));
         t.addView(top);
+        String prog = e.progressLabel();
+        if (prog != null) {
+            TextView pl = text(prog, 12, TEXT, false);
+            pl.setPadding(0, dp(8), 0, dp(4));
+            t.addView(pl);
+            android.widget.ProgressBar pb = new android.widget.ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+            pb.setMax(1000);
+            pb.setProgress((int) Math.min(1000, e.pos / e.dur * 1000));
+            pb.setProgressTintList(android.content.res.ColorStateList.valueOf(ACCENT));
+            pb.setProgressBackgroundTintList(android.content.res.ColorStateList.valueOf(BORDER));
+            t.addView(pb, new LinearLayout.LayoutParams(-1, dp(6)));
+        }
         TextView meta = text(ago(e.time) + " · " + siteName(e) + (e.played ? "" : " · nur geöffnet"), 12, MUTED, false);
         meta.setPadding(0, dp(8), 0, dp(10));
         meta.setSingleLine(true);

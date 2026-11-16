@@ -24,7 +24,7 @@ import org.json.JSONObject;
  */
 public class CastService extends Service {
     static final String EXTRA_HOST = "host", EXTRA_PORT = "port", EXTRA_DEVICE = "device", EXTRA_URL = "url",
-        EXTRA_TYPE = "type", EXTRA_REFERER = "referer", EXTRA_UA = "ua", EXTRA_TITLE = "title";
+        EXTRA_TYPE = "type", EXTRA_REFERER = "referer", EXTRA_UA = "ua", EXTRA_TITLE = "title", EXTRA_START = "start";
     static final String ACTION_TOGGLE = "de.webapp.anime.CAST_TOGGLE", ACTION_STOP = "de.webapp.anime.CAST_STOP",
         ACTION_FWD = "de.webapp.anime.CAST_FWD", ACTION_BACK = "de.webapp.anime.CAST_BACK";
     private static final String CHANNEL = "cast";
@@ -44,6 +44,7 @@ public class CastService extends Service {
     private volatile double currentTime;
     private volatile boolean viaPhone;
     private volatile int attempt; // 0 = direkt, 1 = ueber Handy
+    private volatile double startAt;
     private final Object waitLock = new Object();
     private volatile String waitResult;
 
@@ -79,6 +80,7 @@ public class CastService extends Service {
         final String host = intent.getStringExtra(EXTRA_HOST);
         final int port = intent.getIntExtra(EXTRA_PORT, 8009);
         final String url = intent.getStringExtra(EXTRA_URL);
+        startAt = intent.getDoubleExtra(EXTRA_START, 0);
         final String type = intent.getStringExtra(EXTRA_TYPE);
         final String ref = intent.getStringExtra(EXTRA_REFERER);
         final String ua = intent.getStringExtra(EXTRA_UA);
@@ -131,7 +133,7 @@ public class CastService extends Service {
 
     private String loadAndWait(String url, String contentType) throws Exception {
         waitResult = null;
-        client.load(url, contentType, title);
+        client.load(url, contentType, title, startAt);
         long until = System.currentTimeMillis() + 30000;
         synchronized (waitLock) {
             while (waitResult == null && System.currentTimeMillis() < until) waitLock.wait(500);

@@ -21,6 +21,14 @@ final class HistoryStore {
         int season = -1, episode = -1;
         boolean movie, played;
         long time;
+        double pos = -1, dur = -1; // Abspielposition / Laenge in Sekunden
+
+        /** "bei 12:34 von 24:10" oder null */
+        String progressLabel() {
+            if (pos < 5 || dur <= 0) return null;
+            if (pos > dur - 60) return "zu Ende gesehen";
+            return "bei " + fmt(pos) + " von " + fmt(dur);
+        }
 
         String label() {
             if (movie) return episode >= 0 ? "Film " + episode : "Film";
@@ -55,6 +63,8 @@ final class HistoryStore {
                 e.movie = o.optBoolean("movie");
                 e.played = o.optBoolean("played");
                 e.time = o.optLong("time");
+                e.pos = o.optDouble("pos", -1);
+                e.dur = o.optDouble("dur", -1);
                 entries.add(e);
             }
         } catch (Exception ignored) {}
@@ -66,7 +76,7 @@ final class HistoryStore {
             for (Entry e : entries) {
                 a.put(new JSONObject().put("url", e.url).put("title", e.title).put("series", e.series).put("key", e.seriesKey)
                     .put("site", e.siteId).put("s", e.season).put("e", e.episode).put("movie", e.movie)
-                    .put("played", e.played).put("time", e.time));
+                    .put("played", e.played).put("time", e.time).put("pos", e.pos).put("dur", e.dur));
             }
         } catch (Exception ignored) {}
         prefs.edit().putString("history", a.toString()).apply();
@@ -89,6 +99,8 @@ final class HistoryStore {
         e.played = played || (old != null && old.played);
         if (old != null) {
             entries.remove(old);
+            e.pos = old.pos;
+            e.dur = old.dur;
             if ((pageTitle == null || pageTitle.startsWith("http")) && old.series != null) { e.series = old.series; e.title = old.title; }
         }
         entries.add(0, e);
@@ -158,6 +170,34 @@ final class HistoryStore {
         Matcher m = Pattern.compile("((?:episode|folge|ep)-)(\\d+)", Pattern.CASE_INSENSITIVE).matcher(e.url);
         if (!m.find()) return null;
         return e.url.substring(0, m.start()) + m.group(1) + (Integer.parseInt(m.group(2)) + 1) + e.url.substring(m.end());
+    }
+
+    Entry find(String url) {
+        for (Entry e : entries) if (e.url.equals(url)) return e;
+        return null;
+    }
+
+    /** Abspielposition merken; true, wenn die Folge im Verlauf steht. */
+    boolean setPosition(String url, double pos, double dur, boolean persist) {
+        Entry e = find(url);
+        if (e == null) return false;
+        e.pos = pos;
+        e.dur = dur;
+        e.played = true;
+        e.time = System.currentTimeMillis();
+        if (persist) save();
+        return true;
+    }
+
+    double getPosition(String url) {
+        Entry e = find(url);
+        if (e == null || e.pos < 15 || e.dur <= 0 || e.pos > e.dur - 60) return -1;
+        return e.pos;
+    }
+
+    static String fmt(double sec) {
+        int s = (int) Math.round(sec), h = s / 3600, m = (s % 3600) / 60;
+        return h > 0 ? String.format(Locale.GERMANY, "%d:%02d:%02d", h, m, s % 60) : String.format(Locale.GERMANY, "%d:%02d", m, s % 60);
     }
 
     void removeSeries(String key) {
