@@ -96,6 +96,11 @@ public class MainActivity extends Activity {
     private boolean clearHistoryPending;
     private volatile boolean pageError;
     private android.widget.ImageView castBtn, castFull;
+    private FrameLayout fsWrap;
+    private LinearLayout fsButtons;
+    private TextView zoomBtn;
+    private boolean fsControlsVisible;
+    private boolean fillScreen;
 
     // ======================================================================
     @Override
@@ -104,6 +109,7 @@ public class MainActivity extends Activity {
         prefs = getSharedPreferences("webapp", MODE_PRIVATE);
         adblock = prefs.getBoolean("adblock", true);
         popupBlock = prefs.getBoolean("popupBlock", true);
+        fillScreen = prefs.getBoolean("fillScreen", true);
 
         Window w = getWindow();
         w.setBackgroundDrawable(new ColorDrawable(BG));
@@ -265,13 +271,42 @@ public class MainActivity extends Activity {
             if (customView != null) { cb.onCustomViewHidden(); return; }
             customView = view;
             customCallback = cb;
-            root.addView(view, new FrameLayout.LayoutParams(-1, -1));
-            // Cast-Knopf oben rechts im Vollbild
+            // Huelle um das Vollbild: bemerkt jedes Antippen (ohne es dem Player wegzunehmen)
+            fsWrap = new FrameLayout(MainActivity.this) {
+                @Override public boolean dispatchTouchEvent(MotionEvent e) {
+                    if (e.getActionMasked() == MotionEvent.ACTION_DOWN) onFullscreenTouch();
+                    return super.dispatchTouchEvent(e);
+                }
+            };
+            fsWrap.setBackgroundColor(Color.BLACK);
+            fsWrap.addView(view, new FrameLayout.LayoutParams(-1, -1));
+            root.addView(fsWrap, new FrameLayout.LayoutParams(-1, -1));
+            fsWrap.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> { if (r - l != or - ol || b - t != ob - ot) applyZoom(false); });
+
+            // Knoepfe oben rechts: Bild fuellen/anpassen + Cast (blenden sich wie die Player-Steuerung aus)
+            fsButtons = new LinearLayout(MainActivity.this);
+            fsButtons.setOrientation(LinearLayout.HORIZONTAL);
+            fsButtons.setGravity(Gravity.CENTER_VERTICAL);
+            zoomBtn = text("", 13, Color.WHITE, true);
+            zoomBtn.setGravity(Gravity.CENTER);
+            zoomBtn.setPadding(dp(14), 0, dp(14), 0);
+            zoomBtn.setBackground(rounded(0x99000000, 24));
+            zoomBtn.setOnClickListener(v -> {
+                fillScreen = !fillScreen;
+                prefs.edit().putBoolean("fillScreen", fillScreen).apply();
+                updateZoomLabel();
+                onFullscreenTouch();
+            });
+            updateZoomLabel();
+            fsButtons.addView(zoomBtn, new LinearLayout.LayoutParams(-2, dp(44)));
             castFull = castIcon(48, 0x99000000);
-            FrameLayout.LayoutParams cfl = new FrameLayout.LayoutParams(dp(48), dp(48), Gravity.TOP | Gravity.END);
-            cfl.setMargins(0, dp(16), dp(16), 0);
-            root.addView(castFull, cfl);
-            castFull.setAlpha(0.7f);
+            LinearLayout.LayoutParams cfp = new LinearLayout.LayoutParams(dp(48), dp(48));
+            cfp.leftMargin = dp(10);
+            fsButtons.addView(castFull, cfp);
+            FrameLayout.LayoutParams fbl = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.END);
+            fbl.setMargins(0, dp(16), dp(16), 0);
+            root.addView(fsButtons, fbl);
+            onFullscreenTouch(); // Knoepfe kurz zeigen, dann ausblenden + zoomen
             fab.setVisibility(View.GONE);
             if (castBtn != null) castBtn.setVisibility(View.GONE);
             setFullscreenUi(true);
@@ -317,14 +352,69 @@ public class MainActivity extends Activity {
 
     private void exitFullscreen() {
         if (customView == null) return;
-        root.removeView(customView);
-        if (castFull != null) { root.removeView(castFull); castFull = null; }
+        ui.removeCallbacks(hideFsControls);
+        if (fsWrap != null) { fsWrap.removeAllViews(); root.removeView(fsWrap); fsWrap = null; }
+        if (fsButtons != null) { root.removeView(fsButtons); fsButtons = null; }
+        castFull = null;
+        zoomBtn = null;
         customView = null;
         if (customCallback != null) customCallback.onCustomViewHidden();
         customCallback = null;
         setFabVisible(true);
         setFullscreenUi(false);
         setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+    }
+
+    // ---------- Cast-Knopf ueber dem Hauptknopf: nach 4 s ohne Beruehrung fast ausblenden ----------
+    private final Runnable dimCastBtn = () -> { if (castBtn != null) castBtn.animate().alpha(0.25f).setDuration(400).start(); };
+
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent e) {
+        if (e.getActionMasked() == MotionEvent.ACTION_DOWN && castBtn != null && castBtn.getVisibility() == View.VISIBLE) {
+            castBtn.animate().cancel();
+            castBtn.setAlpha(1f);
+            ui.removeCallbacks(dimCastBtn);
+            ui.postDelayed(dimCastBtn, 4000);
+        }
+        return super.dispatchTouchEvent(e);
+    }
+
+    // ---------- Vollbild: Bild fuellen + automatisch ausblendende Knoepfe ----------
+
+    private final Runnable hideFsControls = () -> {
+        fsControlsVisible = false;
+        if (fsButtons != null) fsButtons.animate().alpha(0f).setDuration(300)
+            .withEndAction(() -> { if (fsButtons != null && !fsControlsVisible) fsButtons.setVisibility(View.INVISIBLE); }).start();
+        applyZoom(true);
+    };
+
+    /** Antippen im Vollbild: Knoepfe zeigen, ganzes Bild (Player-Steuerung sichtbar), nach 3,5 s wieder ausblenden. */
+    private void onFullscreenTouch() {
+        fsControlsVisible = true;
+        if (fsButtons != null) {
+            fsButtons.animate().cancel();
+            fsButtons.setVisibility(View.VISIBLE);
+            fsButtons.animate().alpha(1f).setDuration(150).start();
+        }
+        applyZoom(true);
+        ui.removeCallbacks(hideFsControls);
+        ui.postDelayed(hideFsControls, 3500);
+    }
+
+    /** "Bild fuellen": 16:9-Video auf breite Handy-Bildschirme vergroessern (keine schwarzen Balken). */
+    private void applyZoom(boolean animate) {
+        if (customView == null || fsWrap == null) return;
+        float s = 1f;
+        int w = fsWrap.getWidth(), h = fsWrap.getHeight();
+        if (fillScreen && !fsControlsVisible && w > h && h > 0) {
+            float ar = (float) w / h, video = 16f / 9f;
+            if (ar > video + 0.02f) s = ar / video;
+        }
+        customView.animate().scaleX(s).scaleY(s).setDuration(animate ? 220 : 0).start();
+    }
+
+    private void updateZoomLabel() {
+        if (zoomBtn != null) zoomBtn.setText(fillScreen ? "⤡  Ganzes Bild" : "⤢  Bild füllen");
     }
 
     @SuppressWarnings("deprecation")
@@ -512,7 +602,15 @@ public class MainActivity extends Activity {
         badge.setText(String.valueOf(n));
         badge.setVisibility(n > 0 ? View.VISIBLE : View.GONE);
         fab.setAlpha(n > 0 ? 1f : 0.6f);
-        if (castBtn != null) castBtn.setVisibility(n > 0 && fab.getVisibility() == View.VISIBLE ? View.VISIBLE : View.GONE);
+        if (castBtn != null) {
+            boolean show = n > 0 && fab.getVisibility() == View.VISIBLE;
+            if (show && castBtn.getVisibility() != View.VISIBLE) {
+                castBtn.setAlpha(1f);
+                ui.removeCallbacks(dimCastBtn);
+                ui.postDelayed(dimCastBtn, 4000);
+            }
+            castBtn.setVisibility(show ? View.VISIBLE : View.GONE);
+        }
     }
 
     // ======================================================================
